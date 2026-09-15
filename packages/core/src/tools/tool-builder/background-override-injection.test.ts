@@ -588,4 +588,65 @@ describe('CoreToolBuilder background override injection', () => {
       );
     });
   });
+
+  // Regression coverage for the workflow resume path: when `resumeData` is
+  // present the builder skips its outer input validation entirely, and for
+  // workflow execution the resume data is nested under `toolContext.workflow`
+  // — so `Tool.execute` does not detect the resume either and instead honors
+  // the builder-validated marker. Malformed injected values (e.g. a
+  // non-string `suspendedToolRunId`, despite the injected schema declaring
+  // `string | null`) must be rejected before that marker is honored.
+  describe('Workflow resume path validation', () => {
+    function buildWorkflowTool(id: string, execute: ReturnType<typeof vi.fn>) {
+      const tool = createTool({
+        id,
+        description: 'Workflow as a tool',
+        inputSchema: z4.object({ message: z4.string() }),
+        execute,
+      });
+      return new CoreToolBuilder({
+        originalTool: tool,
+        options: {
+          ...baseOptions(),
+          name: id,
+          backgroundConfig: undefined,
+          workflowId: 'wf-1',
+        },
+      }).build();
+    }
+
+    it('rejects a malformed suspendedToolRunId on the resume path', async () => {
+      const execute = vi.fn().mockResolvedValue({ done: true });
+      const built = buildWorkflowTool('workflow-child', execute);
+
+      const result = await built.execute!(
+        { message: 'hi', suspendedToolRunId: 12345 } as any,
+        { resumeData: { approved: true } } as any,
+      );
+
+      expect(result).toMatchObject({
+        error: true,
+        message: expect.stringContaining('suspendedToolRunId'),
+      });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('still delivers valid injected fields to a resumed workflow tool (control)', async () => {
+      const execute = vi.fn().mockResolvedValue({ done: true });
+      const built = buildWorkflowTool('workflow-child-ok', execute);
+
+      const result = await built.execute!(
+        { message: 'hi', suspendedToolRunId: 'run_123', resumeData: { approved: true } } as any,
+        { resumeData: { approved: true } } as any,
+      );
+
+      expect(result).toEqual({ done: true });
+      expect(execute).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'hi', suspendedToolRunId: 'run_123', resumeData: { approved: true } }),
+        expect.objectContaining({
+          workflow: expect.objectContaining({ workflowId: 'wf-1', resumeData: { approved: true } }),
+        }),
+      );
+    });
+  });
 });
